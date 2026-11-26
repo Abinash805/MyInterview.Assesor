@@ -11,10 +11,12 @@ def get_target_score(role: str, difficulty: str) -> float:
     }.get(role, 78.0)
 
     difficulty_offset = {
+        "Intern": -5.0,
         "Junior": -3.0,
         "Mid-Level": 0.0,
         "Senior": 5.0,
         "Lead": 8.0,
+        "Senior Manager": 8.0,
     }.get(difficulty, 0.0)
 
     return round(max(60.0, min(95.0, role_base + difficulty_offset)), 1)
