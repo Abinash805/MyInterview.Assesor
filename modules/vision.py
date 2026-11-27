@@ -23,12 +23,17 @@ def _ensure_model_file(filename: str, url: str) -> Path | None:
     target = models_dir / filename
     if target.exists() and target.stat().st_size > 100_000:
         return target
+    # Download to a temp name so an interrupted download never leaves a corrupt model behind.
+    partial = target.with_suffix(target.suffix + ".part")
     try:
-        urlretrieve(url, str(target))
-        if target.exists() and target.stat().st_size > 100_000:
+        urlretrieve(url, str(partial))
+        if partial.exists() and partial.stat().st_size > 100_000:
+            partial.replace(target)
             return target
     except Exception:
-        return None
+        pass
+    finally:
+        partial.unlink(missing_ok=True)
     return None
 
 
@@ -68,8 +73,11 @@ def _compute_posture_from_landmarks(pose_landmarks: list[Any]) -> float:
         left_shoulder = pose_landmarks[11]
         right_shoulder = pose_landmarks[12]
 
-        l_vis = getattr(left_shoulder, "visibility", 0.8) or 0.8
-        r_vis = getattr(right_shoulder, "visibility", 0.8) or 0.8
+        # Only default when visibility is missing; 0.0 means "not visible", not "unknown".
+        l_vis = getattr(left_shoulder, "visibility", None)
+        r_vis = getattr(right_shoulder, "visibility", None)
+        l_vis = 0.8 if l_vis is None else l_vis
+        r_vis = 0.8 if r_vis is None else r_vis
         if min(l_vis, r_vis) < 0.4:
             return 60.0
 

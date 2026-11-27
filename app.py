@@ -1,3 +1,4 @@
+import html
 import io
 import json
 import os
@@ -20,6 +21,9 @@ from modules.scoring import compute_predictive_score, get_target_score
 from modules.vision import analyze_video_visuals
 
 load_dotenv()
+
+APP_DIR = Path(__file__).resolve().parent
+SAMPLE_CLIP_PATH = APP_DIR / "assets" / "test_clip.mp4"
 
 st.set_page_config(
     page_title="MyInterview.Assessor",
@@ -141,7 +145,7 @@ LIVE_RECORDER_HTML = """
   <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
     <button id="startBtn" type="button" style="padding:8px 14px;border-radius:8px;border:none;background:#2F6F4E;color:#FFFFFF;font-weight:600;cursor:pointer;">Start Camera & Record</button>
     <button id="stopBtn" type="button" disabled style="padding:8px 14px;border-radius:8px;border:none;background:#B53A2D;color:#FFFFFF;font-weight:600;cursor:pointer;">Stop Recording</button>
-    <a id="downloadLink" style="display:none;padding:8px 14px;border-radius:8px;background:#C96442;color:#FFFFFF;text-decoration:none;font-size:13px;font-weight:600;">Download Clip (.webm)</a>
+    <a id="downloadLink" style="display:none;padding:8px 14px;border-radius:8px;background:#C96442;color:#FFFFFF;text-decoration:none;font-size:13px;font-weight:600;">Download Clip</a>
     <span id="timerText" style="font-size:13px;font-weight:600;color:#5C5750;margin-left:auto;">00:00</span>
   </div>
   <div id="statusText" style="margin-top:8px;font-size:12.5px;color:#5C5750;">Ready for short answers or multi-minute sessions.</div>
@@ -176,10 +180,13 @@ startBtn.onclick = async () => {
     streamRef = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
     preview.srcObject = streamRef;
 
-    const mimeType = MediaRecorder.isTypeSupported("video/webm;codecs=vp8,opus")
-      ? "video/webm;codecs=vp8,opus"
-      : "video/webm";
-    mediaRecorder = new MediaRecorder(streamRef, { mimeType });
+    const candidates = ["video/webm;codecs=vp8,opus", "video/webm", "video/mp4"];
+    const supported = candidates.find((t) => MediaRecorder.isTypeSupported(t));
+    mediaRecorder = supported
+      ? new MediaRecorder(streamRef, { mimeType: supported })
+      : new MediaRecorder(streamRef);
+    const mimeType = mediaRecorder.mimeType || supported || "video/webm";
+    const fileExt = mimeType.includes("mp4") ? "mp4" : "webm";
 
     mediaRecorder.ondataavailable = (event) => {
       if (event.data && event.data.size > 0) {
@@ -192,7 +199,7 @@ startBtn.onclick = async () => {
       const blob = new Blob(recordedChunks, { type: mimeType });
       const url = URL.createObjectURL(blob);
       downloadLink.href = url;
-      downloadLink.download = "live_interview_session.webm";
+      downloadLink.download = "live_interview_session." + fileExt;
       downloadLink.style.display = "inline-block";
       statusText.textContent = "Recording ready — download the clip and select it below to evaluate.";
       if (streamRef) {
@@ -241,6 +248,26 @@ if "q_number" not in st.session_state:
     st.session_state.q_number = 1
 if "latest_evaluation" not in st.session_state:
     st.session_state.latest_evaluation = None
+if "q_editor_rev" not in st.session_state:
+    # Bumped whenever a new question is generated so the keyed text_area is
+    # re-created with the new value instead of keeping its stale widget state.
+    st.session_state.q_editor_rev = 0
+
+
+def _write_upload_to_temp(uploaded: Any, default_suffix: str) -> Path:
+    """Persist an uploaded file to a named temp file and return its path."""
+    suffix = Path(uploaded.name).suffix or default_suffix
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(uploaded.getbuffer())
+    return Path(tmp.name)
+
+
+def _render_html_component(markup: str, height: int) -> None:
+    """Render trusted inline HTML/JS, preferring st.iframe on newer Streamlit."""
+    if hasattr(st, "iframe"):
+        st.iframe(markup, height=height)
+    else:
+        components.html(markup, height=height)
 
 
 def _extract_resume_text(uploaded_resume: Any) -> str:
@@ -303,6 +330,15 @@ def _download_drive_video_to_temp(drive_input: str, max_mb: int = 150) -> Path:
 
     content_type = resp.headers.get("Content-Type", "").lower()
     if "text/html" in content_type:
+        # Large files return an HTML "virus scan warning" page with a confirm form.
+        page = resp.text
+        form = re.search(r'<form[^>]+id="download-form"[^>]+action="([^"]+)"', page)
+        if form:
+            params = dict(re.findall(r'<input[^>]+name="([^"]+)"[^>]+value="([^"]*)"', page))
+            resp = session.get(html.unescape(form.group(1)), params=params, stream=True, timeout=60)
+            resp.raise_for_status()
+            content_type = resp.headers.get("Content-Type", "").lower()
+    if "text/html" in content_type:
         raise RuntimeError(
             "Google Drive returned an HTML page instead of a video. "
             "Check that sharing is set to 'Anyone with the link'."
@@ -360,7 +396,7 @@ def _build_markdown_report(eval_data: dict[str, Any]) -> str:
         f"- Pitch Variation: {audio.get('pitch_std_hz', 0)} Hz | Audio Clarity: {audio.get('audio_clarity_score', 0)}%",
         "",
         "## Transcript",
-        audio.get("transcript", "_No transcript captured._"),
+        audio.get("transcript") or "_No transcript captured._",
         "",
         "## AI Evaluation & Feedback",
         nlp.get("summary_feedback", ""),
@@ -506,7 +542,7 @@ if page == "1. Live Interview":
                 f"""
                 <div class="prompt-card">
                   <div class="prompt-meta">Question #{st.session_state.q_number} · Resume-Tailored</div>
-                  <div class="prompt-text">"{st.session_state.question}"</div>
+                  <div class="prompt-text">"{html.escape(st.session_state.question)}"</div>
                 </div>
                 """,
                 unsafe_allow_html=True,
@@ -522,6 +558,7 @@ if page == "1. Live Interview":
                             resume_text=st.session_state.resume_text or None,
                             question_number=st.session_state.q_number,
                         )
+                        st.session_state.q_editor_rev += 1
                         st.rerun()
 
             with act2:
@@ -539,13 +576,14 @@ if page == "1. Live Interview":
                             question_number=next_num,
                         )
                         st.session_state.q_number = next_num
+                        st.session_state.q_editor_rev += 1
                         st.rerun()
 
             question = st.text_area(
                 "Refine Question (Optional)",
                 value=st.session_state.question,
                 height=80,
-                key=f"live_q_editor_{st.session_state.q_number}",
+                key=f"live_q_editor_{st.session_state.q_editor_rev}",
             )
 
             sample_fps = st.slider(
@@ -564,7 +602,7 @@ if page == "1. Live Interview":
     with right_col:
         with st.container(border=True):
             st.markdown("### 2. Record Answer & Evaluate")
-            components.html(LIVE_RECORDER_HTML, height=390)
+            _render_html_component(LIVE_RECORDER_HTML, height=390)
 
             live_upload = st.file_uploader(
                 "Select Recorded Clip (.webm, .mp4, .mov, .mkv)",
@@ -572,25 +610,17 @@ if page == "1. Live Interview":
                 key="live_clip_uploader",
             )
 
-            temp_live_file = None
-            active_live_path: Path | None = None
-
             if live_upload is not None:
-                suffix = Path(live_upload.name).suffix or ".webm"
-                temp_live_file = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
-                temp_live_file.write(live_upload.getbuffer())
-                temp_live_file.flush()
-                temp_live_file.close()
-                active_live_path = Path(temp_live_file.name)
                 st.video(live_upload.getvalue())
 
             if st.button(
                 "Evaluate Response",
                 type="primary",
                 use_container_width=True,
-                disabled=active_live_path is None,
+                disabled=live_upload is None,
             ):
-                if active_live_path is not None:
+                if live_upload is not None:
+                    active_live_path = _write_upload_to_temp(live_upload, ".webm")
                     try:
                         result = _run_assessment_pipeline(
                             video_path=active_live_path,
@@ -608,11 +638,7 @@ if page == "1. Live Interview":
                     except Exception as exc:
                         st.error(f"Assessment failed: {exc}")
                     finally:
-                        if temp_live_file is not None and Path(temp_live_file.name).exists():
-                            try:
-                                Path(temp_live_file.name).unlink()
-                            except OSError:
-                                pass
+                        active_live_path.unlink(missing_ok=True)
 
 
 # ==============================================================================
@@ -648,18 +674,18 @@ elif page == "2. Drive / Clip Eval":
 
             if st.button("Generate Resume Question", key="vid_gen_q", use_container_width=True):
                 with st.spinner("Generating question..."):
-                    st.session_state["vid_dynamic_q"] = generate_dynamic_question(
+                    st.session_state["vid_q"] = generate_dynamic_question(
                         role=role,
                         difficulty=difficulty,
                         resume_text=st.session_state.resume_text or None,
                         question_number=1,
                     )
 
-            default_vid_q = st.session_state.get(
-                "vid_dynamic_q",
-                f"Walk me through a key project on your resume relevant to a {difficulty} {role} role.",
-            )
-            question = st.text_area("Evaluated Question", value=default_vid_q, height=85, key="vid_q")
+            if "vid_q" not in st.session_state:
+                st.session_state["vid_q"] = (
+                    f"Walk me through a key project on your resume relevant to a {difficulty} {role} role."
+                )
+            question = st.text_area("Evaluated Question", height=85, key="vid_q")
             sample_fps = st.slider("Frame Sampling (FPS)", min_value=0.5, max_value=3.0, value=2.0, step=0.5, key="vid_fps")
 
     with right_col:
@@ -688,32 +714,28 @@ elif page == "2. Drive / Clip Eval":
                     type=["mp4", "mov", "webm", "avi", "mkv"],
                     key="batch_clip_uploader",
                 )
-                sample_clip = Path("assets/test_clip.mp4")
-                if uploaded_file is None and sample_clip.exists():
+                if uploaded_file is None and SAMPLE_CLIP_PATH.exists():
                     use_sample = st.checkbox("Use local sample (`assets/test_clip.mp4`)", value=True)
 
             active_video_path: Path | None = None
-            temp_file_obj = None
 
             if uploaded_file is not None:
-                suffix = Path(uploaded_file.name).suffix or ".mp4"
-                temp_file_obj = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
-                temp_file_obj.write(uploaded_file.getbuffer())
-                temp_file_obj.flush()
-                temp_file_obj.close()
-                active_video_path = Path(temp_file_obj.name)
                 st.video(uploaded_file.getvalue())
-            elif use_sample and Path("assets/test_clip.mp4").exists():
-                active_video_path = Path("assets/test_clip.mp4")
+            elif use_sample and SAMPLE_CLIP_PATH.exists():
+                active_video_path = SAMPLE_CLIP_PATH
                 st.video(str(active_video_path))
 
             has_drive_input = source_mode == "Google Drive Link" and bool(drive_link.strip())
-            can_run = has_drive_input or active_video_path is not None
+            can_run = has_drive_input or uploaded_file is not None or active_video_path is not None
 
             if st.button("Run Full Assessment", type="primary", use_container_width=True, disabled=not can_run):
                 downloaded_drive_path: Path | None = None
+                uploaded_tmp_path: Path | None = None
                 try:
-                    if source_mode == "Google Drive Link":
+                    if uploaded_file is not None:
+                        uploaded_tmp_path = _write_upload_to_temp(uploaded_file, ".mp4")
+                        active_video_path = uploaded_tmp_path
+                    elif source_mode == "Google Drive Link":
                         with st.spinner("Fetching video from Google Drive..."):
                             downloaded_drive_path = _download_drive_video_to_temp(drive_link)
                         active_video_path = downloaded_drive_path
@@ -735,10 +757,7 @@ elif page == "2. Drive / Clip Eval":
                 except Exception as exc:
                     st.error(f"Analysis failed: {exc}")
                 finally:
-                    for tmp_p in (
-                        Path(temp_file_obj.name) if temp_file_obj is not None else None,
-                        downloaded_drive_path,
-                    ):
+                    for tmp_p in (uploaded_tmp_path, downloaded_drive_path):
                         if tmp_p is not None and tmp_p.exists():
                             try:
                                 tmp_p.unlink()
@@ -779,7 +798,8 @@ elif page == "3. Report":
         pillars = scoring.get("pillars", {})
 
         st.markdown(
-            f'<div class="app-subtitle">{eval_data["role"]} ({eval_data["difficulty"]}) · Prompt: "{eval_data["question"]}"</div>',
+            f'<div class="app-subtitle">{html.escape(str(eval_data["role"]))} ({html.escape(str(eval_data["difficulty"]))}) · '
+            f'Prompt: "{html.escape(str(eval_data["question"]))}"</div>',
             unsafe_allow_html=True,
         )
 
@@ -922,4 +942,5 @@ elif page == "4. History":
                 if st.button("Clear All Sessions", type="secondary", use_container_width=True):
                     clear_sessions()
                     st.session_state.latest_evaluation = None
+                    st.rerun()
                     st.rerun()
