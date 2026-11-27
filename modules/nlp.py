@@ -18,12 +18,36 @@ def _extract_json_object(raw_text: str) -> dict[str, Any]:
     cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
     cleaned = re.sub(r"\s*```$", "", cleaned)
     try:
-        return json.loads(cleaned)
+        parsed = json.loads(cleaned)
     except json.JSONDecodeError:
         match = re.search(r"\{.*\}", cleaned, re.DOTALL)
-        if match:
-            return json.loads(match.group(0))
-        raise ValueError(f"Model did not return valid JSON: {raw_text[:300]}")
+        if not match:
+            raise ValueError(f"Model did not return valid JSON: {raw_text[:300]}")
+        parsed = json.loads(match.group(0))
+    if isinstance(parsed, list) and parsed and isinstance(parsed[0], dict):
+        parsed = parsed[0]
+    if not isinstance(parsed, dict):
+        raise ValueError(f"Model did not return a JSON object: {raw_text[:300]}")
+    return parsed
+
+
+def _clamp_score(value: Any, default: float = 65.0) -> float:
+    """Coerce a model-provided score (number, numeric string, null) into 0-100."""
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        score = default
+    if score != score:  # NaN
+        score = default
+    return round(max(0.0, min(100.0, score)), 1)
+
+
+def _as_str_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(v) for v in value if v is not None]
+    if isinstance(value, str) and value.strip():
+        return [value.strip()]
+    return []
 
 
 def _generate_with_fallback(
@@ -121,17 +145,20 @@ Return ONLY a valid JSON object matching this exact schema:
 
     data = _extract_json_object(response.text or "{}")
 
-    content_score = round(max(0.0, min(100.0, float(data.get("content_score", 65.0)))), 1)
-    relevance_score = round(max(0.0, min(100.0, float(data.get("relevance_score", 65.0)))), 1)
+    star = data.get("star_breakdown")
+    star_breakdown: dict[str, Any] = {}
+    if isinstance(star, dict):
+        for key, info in star.items():
+            star_breakdown[str(key).lower()] = info if isinstance(info, dict) else {"present": bool(info), "note": ""}
 
     return {
-        "content_score": content_score,
-        "relevance_score": relevance_score,
-        "star_breakdown": data.get("star_breakdown", {}),
-        "keywords_matched": data.get("keywords_matched", []),
-        "strengths": data.get("strengths", []),
-        "improvements": data.get("improvements", []),
-        "summary_feedback": str(data.get("summary_feedback", "")).strip(),
+        "content_score": _clamp_score(data.get("content_score")),
+        "relevance_score": _clamp_score(data.get("relevance_score")),
+        "star_breakdown": star_breakdown,
+        "keywords_matched": _as_str_list(data.get("keywords_matched")),
+        "strengths": _as_str_list(data.get("strengths")),
+        "improvements": _as_str_list(data.get("improvements")),
+        "summary_feedback": str(data.get("summary_feedback") or "").strip(),
     }
 
 

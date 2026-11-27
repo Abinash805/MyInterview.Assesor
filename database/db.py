@@ -1,5 +1,6 @@
 import json
 import sqlite3
+from contextlib import closing
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -15,7 +16,7 @@ def _get_connection(db_path: Path = DEFAULT_DB_PATH) -> sqlite3.Connection:
 
 def init_db(db_path: Path = DEFAULT_DB_PATH) -> None:
     """Create the sessions table if it does not already exist."""
-    with _get_connection(db_path) as conn:
+    with closing(_get_connection(db_path)) as conn, conn:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS sessions (
@@ -77,7 +78,7 @@ def save_session(
     pillars = score_result.get("pillars", {})
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    with _get_connection(db_path) as conn:
+    with closing(_get_connection(db_path)) as conn, conn:
         cursor = conn.execute(
             """
             INSERT INTO sessions (
@@ -118,7 +119,7 @@ def save_session(
 def get_sessions(limit: int = 50, db_path: Path = DEFAULT_DB_PATH) -> list[dict[str, Any]]:
     """Fetch recent sessions ordered newest-first."""
     init_db(db_path)
-    with _get_connection(db_path) as conn:
+    with closing(_get_connection(db_path)) as conn, conn:
         rows = conn.execute(
             """
             SELECT id, created_at, role, difficulty, question,
@@ -147,6 +148,6 @@ def get_sessions(limit: int = 50, db_path: Path = DEFAULT_DB_PATH) -> list[dict[
 def clear_sessions(db_path: Path = DEFAULT_DB_PATH) -> None:
     """Delete all saved sessions."""
     init_db(db_path)
-    with _get_connection(db_path) as conn:
+    with closing(_get_connection(db_path)) as conn, conn:
         conn.execute("DELETE FROM sessions")
         conn.commit()
